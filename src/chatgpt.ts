@@ -40,11 +40,12 @@ const ErrorCode2Message: Record<string, string> = {
   "503":
     "OpenAI 服务器繁忙，请稍后再试| The OpenAI server is busy, please try again later",
   "429":
-    "OpenAI 服务器限流，请稍后再试| The OpenAI server was limted, please try again later",
+    "OpenAI 服务器限流，请稍后再试| The OpenAI server was limited, please try again later",
   "500":
     "OpenAI 服务器繁忙，请稍后再试| The OpenAI server is busy, please try again later",
   unknown: "未知错误，请看日志 | Error unknown, please see the log",
 };
+const Commands = ["/reset", "/help"] as const;
 export class ChatGPTPoole {
   chatGPTPools: Array<IChatGPTItem> | [] = [];
   conversationsPool: Map<string, IConversationItem> = new Map();
@@ -57,7 +58,12 @@ export class ChatGPTPoole {
     const platform = process.platform;
     const { stdout, stderr, exitCode } = await execa(
       platform === "win32" ? "powershell" : "sh",
-      [platform === "win32" ? "/c" : "-c", cmd]
+      [platform === "win32" ? "/c" : "-c", cmd],
+      {
+        env: {
+          https_proxy: config.openAIProxy || process.env.https_proxy,
+        },
+      }
     );
     if (exitCode !== 0) {
       console.error(`${email} login failed: ${stderr}`);
@@ -99,6 +105,8 @@ export class ChatGPTPoole {
           );
           chatGPTItem.chatGpt = new ChatGPTAPI({
             sessionToken: session_token,
+            clearanceToken: config.clearanceToken,
+            userAgent: config.userAgent,
           });
         } catch (err) {
           //remove this object
@@ -129,6 +137,9 @@ export class ChatGPTPoole {
       );
     }
   }
+  resetConversation(talkid: string) {
+    this.conversationsPool.delete(talkid);
+  }
   async startPools() {
     const sessionAccounts = config.chatGPTAccountPool.filter(
       isAccountWithSessionToken
@@ -151,6 +162,8 @@ export class ChatGPTPoole {
       return {
         chatGpt: new ChatGPTAPI({
           sessionToken: account.session_token,
+          clearanceToken: config.clearanceToken,
+          userAgent: config.userAgent,
         }),
         account,
       };
@@ -159,6 +172,17 @@ export class ChatGPTPoole {
       throw new Error("⚠️ No chatgpt account in pool");
     }
     console.log(`ChatGPTPools: ${this.chatGPTPools.length}`);
+  }
+  async command(cmd: typeof Commands[number], talkid: string): Promise<string> {
+    console.log(`command: ${cmd} talkid: ${talkid}`);
+    if (cmd == "/reset") {
+      this.resetConversation(talkid);
+      return "♻️ 已重置对话 ｜ Conversation reset";
+    }
+    if (cmd == "/help") {
+      return `🧾 支持的命令｜Support command：${Commands.join("，")}`;
+    }
+    return "❓ 未知命令｜Unknow Command";
   }
   // Randome get chatgpt item form pool
   get chatGPTAPI(): IChatGPTItem {
@@ -185,6 +209,13 @@ export class ChatGPTPoole {
   }
   // send message with talkid
   async sendMessage(message: string, talkid: string): Promise<string> {
+    if (
+      Commands.some((cmd) => {
+        return message.startsWith(cmd);
+      })
+    ) {
+      return this.command(message as typeof Commands[number], talkid);
+    }
     const conversationItem = this.getConversation(talkid);
     const { conversation, account } = conversationItem;
     try {
@@ -193,7 +224,9 @@ export class ChatGPTPoole {
       return response;
     } catch (err: any) {
       if (err.message.includes("ChatGPT failed to refresh auth token")) {
+        // If refresh token failed, we will remove the conversation from pool
         await this.resetAccount(account);
+        console.log(`Refresh token failed, account ${JSON.stringify(account)}`);
         return this.sendMessage(message, talkid);
       }
       console.error(
@@ -314,7 +347,7 @@ export class ChatGPTBot {
     text: string,
     room: RoomInterface
   ) {
-    const talkerId = talker.id;
+    const talkerId = room.id + talker.id;
     const gptMessage = await this.getGPTMessage(text, talkerId);
     const result = `${text}\n ------\n ${gptMessage}`;
     await this.trySay(room, result);
